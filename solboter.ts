@@ -20,11 +20,30 @@ const moment = require('moment-timezone');
 const currentDate = moment();
 const addressesToExcludeJsonPath = 'exludeAddresses.json'
 
+import { readFileSync, writeFile } from 'fs';
+
 let allPools: LiquidityPoolKeys[];
 let allTokens : Token[];
 
 async function sleep() {
   return new Promise(resolve => setTimeout(resolve, 350));
+}
+
+async function remove_old_tokens(){
+  const excludedAddressesContent = readFileSync(addressesToExcludeJsonPath, 'utf8');
+  const excludedAddresses = JSON.parse(excludedAddressesContent);
+
+  console.log('excluded mint addresses count: ', excludedAddresses.length);
+  console.log('all pools count before filtering: ', allPools.length);
+
+  if (Array.isArray(excludedAddresses)) {
+    allPools = allPools.filter((pool) => {
+      const poolMint = pool.baseMint.toString();
+      return !excludedAddresses.some((address: any) => address.mintAddress === poolMint);
+    });
+    
+  console.log('all pools count after filtering:', allPools.length);
+}
 }
 
 async function load_raydium_tokens(){
@@ -41,7 +60,7 @@ async function load_raydium_tokens(){
     throw('Failed to load Raydium tokens data');
   }
 
-  allTokens = (tokensData?.unOfficial.concat(tokensData?.official) || []).map((tokenObject: any) => {
+  allTokens = (tokensData?.unOfficial.concat(tokensData?.official.concat(tokensData?.unNamed)) || []).map((tokenObject: any) => {
     return {
       symbol: tokenObject.symbol,
       name: tokenObject.name,
@@ -73,35 +92,62 @@ async function load_raydium_token_pools(){
 
 async function get_pool_info(connection: Connection, poolKeys : any) {
   try {
-    await sleep();
+    sleep();
     const poolsInfo = await Liquidity.fetchInfo({
       connection,
       poolKeys,
     });
     
-    const matchingToken = await allTokens.find(token => token.mint === poolKeys.baseMint.toString());
-    const dateFromTimestamp = await moment.unix(poolsInfo.startTime.toNumber());
+    const matchingToken = allTokens.find(token => token.mint === poolKeys.baseMint.toString());
+    const dateFromTimestamp = moment.unix(poolsInfo.startTime.toNumber());
     
-    if (dateFromTimestamp.isAfter(currentDate, 'minute')) {
-      const formattedDate = dateFromTimestamp.tz('Europe/Sofia').format('YYYY-MM-DD HH:mm:ss');
-      console.log(`The pool of token ${matchingToken?.name} with base mint address ${poolKeys.baseMint.toString()} opens at: ${formattedDate}`);
-    }
+    if(dateFromTimestamp.isBefore(currentDate, 'mintue')){
+      const passedToken = {
+        mintAddress: matchingToken?.mint.toString()
+      };
 
+      if(matchingToken?.mint === undefined){
+        return;
+      }
+
+      let existingData = [];
+      try {
+        const existingContent = fs.readFileSync(addressesToExcludeJsonPath, 'utf8');
+        existingData = JSON.parse(existingContent);
+      } catch (readError) {
+      }
+      
+      existingData.push(passedToken);
+
+      const jsonData = JSON.stringify(existingData, null, 2);
+
+      fs.writeFile(addressesToExcludeJsonPath, jsonData, 'utf8', (err : NodeJS.ErrnoException) => {
+        if (err) {
+          console.error('Error writing to file:', err);
+        } 
+      });
+    }
+    else{
+      const formattedDate = dateFromTimestamp.tz('Europe/Sofia').format('YYYY-MM-DD HH:mm:ss'); // Use 'Europe/Sofia' for Bulgarian time
+      console.log(`${matchingToken?.name} pool with base mint address ${poolKeys.baseMint.toString()} opens at: ${formattedDate}`);
+    }
   } catch (error) {
-    throw(`Error fetching liquidity pools information: ${error}`);
+    console.error("Error fetching liquidity pools information:", error);
   }
 }
 
-async function main() {
+async function get_new_tokens() {
   const connection = new Connection("https://api.mainnet-beta.solana.com");
 
   await load_raydium_tokens();
   await load_raydium_token_pools();
+  await remove_old_tokens();
 
   for (const poolKeys of allPools) {
-    get_pool_info(connection, poolKeys);
+    await get_pool_info(connection, poolKeys);
   };
+
+  get_new_tokens();
 }
 
-// main entry 
-main();
+get_new_tokens();
